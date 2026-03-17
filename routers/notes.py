@@ -17,7 +17,7 @@ from schemas.note import (
 )
 from core.security import get_current_user, hash_password, verify_password
 
-router = APIRouter(prefix="/notes", tags=["Notes"])
+router = APIRouter(prefix="/api/notes", tags=["Notes"])
 
 ALLOWED_COLOURS = {
     "#ffffff", "#fef9c3", "#dcfce7", "#dbeafe",
@@ -52,6 +52,53 @@ def serialize_note(note: Note) -> NoteResponse:
     return NoteResponse.from_orm_with_tags(note)
 
 
+def move_note_to_position(
+    note: Note, new_position: int, user: User, db: Session
+) -> None:
+    """
+    Move a note to a new position, adjusting other notes as needed.
+    Only affects notes in the range between old and new position.
+    """
+    old_position = note.position
+    
+    if old_position == new_position:
+        return  
+    
+    all_notes = db.query(Note).filter(
+        Note.owner_id == user.id,
+        Note.is_deleted == False,
+        Note.id != note.id,
+    ).all()
+    
+    if old_position < new_position:
+        for n in all_notes:
+            if old_position < n.position <= new_position:
+                n.position -= 1
+    else:
+        for n in all_notes:
+            if new_position <= n.position < old_position:
+                n.position += 1
+    
+    note.position = new_position
+
+
+def move_note_to_first(note: Note, user: User, db: Session) -> None:
+    """
+    Move a note to the first position (position 1), shifting others down.
+    """
+    if note.position == 1:
+        return  
+    
+    db.query(Note).filter(
+        Note.owner_id == user.id,
+        Note.is_deleted == False,
+        Note.id != note.id,
+        Note.position < note.position,
+    ).update({Note.position: Note.position + 1}, synchronize_session=False)
+    
+    note.position = 1
+
+
 @router.get("", response_model=PaginatedNotes)
 def list_notes(
     page: int = Query(1, ge=1),
@@ -60,8 +107,8 @@ def list_notes(
     colour: str = Query(None, description="Filter by colour hex"),
     tag: str = Query(None, description="Filter by tag"),
     pinned_only: bool = Query(False, description="Only return pinned notes"),
-    sort_by: str = Query("created_at", description="Sort field: created_at, updated_at, title"),
-    sort_order: str = Query("desc", description="asc or desc"),
+    sort_by: str = Query("position", description="Sort field: position, created_at, updated_at, title"),
+    sort_order: str = Query("asc", description="asc or desc"),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -86,10 +133,9 @@ def list_notes(
     if pinned_only:
         query = query.filter(Note.is_pinned == True)
 
-    # Sorting
     sort_col = getattr(Note, sort_by, Note.created_at)
     query = query.order_by(
-        Note.is_pinned.desc(),  # pinned notes always first
+        Note.is_pinned.desc(), 
         sort_col.desc() if sort_order == "desc" else sort_col.asc(),
     )
 
@@ -113,11 +159,18 @@ def create_note(
     db: Session = Depends(get_db),
 ):
     """Create a new note with optional markdown, colour, tags, and reminder."""
+    # Increment positions of all existing notes to make room for new one at position 1
+    db.query(Note).filter(
+        Note.owner_id == current_user.id,
+        Note.is_deleted == False,
+    ).update({Note.position: Note.position + 1}, synchronize_session=False)
+    
     note = Note(
         title=payload.title,
         description=payload.description,
         description_html=render_markdown(payload.description) if payload.description else None,
         colour=payload.colour or "#ffffff",
+        position=1,  
         tags=",".join(payload.tags) if payload.tags else None,
         reminder_at=payload.reminder_at,
         owner_id=current_user.id,
@@ -176,6 +229,19 @@ def update_note(
 
     if note.is_locked:
         raise HTTPException(status_code=403, detail="Unlock the note before editing")
+
+    if payload.position is not None:
+        move_note_to_position(note, payload.position, current_user, db)
+    else:
+        is_updating_content = any([
+            payload.title is not None,
+            payload.description is not None,
+            payload.colour is not None,
+            payload.tags is not None,
+            payload.reminder_at is not None,
+        ])
+        if is_updating_content:
+            move_note_to_first(note, current_user, db)
 
     if payload.title is not None:
         note.title = payload.title
