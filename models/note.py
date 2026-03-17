@@ -11,18 +11,16 @@ class Note(Base):
     description = Column(Text, nullable=True)        
     description_html = Column(Text, nullable=True)   
 
-    # Status & display
     status = Column(String(50), default="Created")  
     colour = Column(String(20), default="#ffffff")  
     is_pinned = Column(Boolean, default=False)
+    position = Column(Integer, default=0, nullable=False)
     is_locked = Column(Boolean, default=False)
     lock_password = Column(String, nullable=True)
 
-    # Soft delete
     is_deleted = Column(Boolean, default=False)
     deleted_at = Column(DateTime(timezone=True), nullable=True)
 
-    # Share
     share_token = Column(String, unique=True, nullable=True, index=True)
     is_shared = Column(Boolean, default=False)
 
