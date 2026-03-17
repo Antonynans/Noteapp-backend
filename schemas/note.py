@@ -7,6 +7,7 @@ class NoteCreate(BaseModel):
     title: str
     description: Optional[str] = None   
     colour: Optional[str] = "#ffffff"
+    position: Optional[int] = 0
     tags: Optional[List[str]] = []
     reminder_at: Optional[datetime] = None
 
@@ -15,6 +16,7 @@ class NoteUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
     colour: Optional[str] = None
+    position: Optional[int] = None
     tags: Optional[List[str]] = None
     reminder_at: Optional[datetime] = None
 
@@ -35,6 +37,7 @@ class NoteResponse(BaseModel):
     status: str
     colour: str
     is_pinned: bool
+    position: int
     is_locked: bool
     is_shared: bool
     share_token: Optional[str]
@@ -58,6 +61,7 @@ class NoteResponse(BaseModel):
             "status": note.status,
             "colour": note.colour or "#ffffff",
             "is_pinned": note.is_pinned,
+            "position": note.position,
             "is_locked": note.is_locked,
             "is_shared": note.is_shared,
             "share_token": note.share_token if note.is_shared else None,
