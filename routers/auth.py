@@ -16,7 +16,7 @@ from schemas.auth import (
 from core.security import hash_password, verify_password, create_access_token, get_current_user
 from core.config import settings
 
-router = APIRouter(prefix="/auth", tags=["Authentication"])
+router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 
 
 @router.post("/signup", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
@@ -88,13 +88,11 @@ async def upload_avatar(
     filename = f"{uuid.uuid4()}.jpg"
     filepath = os.path.join(settings.UPLOAD_DIR, filename)
 
-    # Resize to 200x200 and save
     from io import BytesIO
     img = Image.open(BytesIO(contents)).convert("RGB")
     img = img.resize((200, 200), Image.LANCZOS)
     img.save(filepath, "JPEG", quality=85)
 
-    # Delete old avatar
     if current_user.avatar_url:
         old_path = current_user.avatar_url.lstrip("/")
         if os.path.exists(old_path):
@@ -133,8 +131,7 @@ async def forgot_password(payload: PasswordResetRequest, db: Session = Depends(g
             from core.email import send_password_reset_email
             await send_password_reset_email(user.email, token)
         except Exception:
-            pass  # silently fail if email not configured
-    # Always return success to prevent email enumeration
+            pass  
     return {"message": "If that email exists, a reset link has been sent"}
 
 
