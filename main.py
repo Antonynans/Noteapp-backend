@@ -12,8 +12,8 @@ Base.metadata.create_all(bind=engine)
 os.makedirs("uploads/avatars", exist_ok=True)
 
 app = FastAPI(
-    title="DevNote API",
-    description="Backend API for the DevNote / Notes by Skillz application",
+    title="Quill API",
+    description="Backend API for Quill / Noteapp application",
     version="2.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
@@ -40,7 +40,7 @@ async def startup_event():
 
 @app.get("/", tags=["Health"])
 def root():
-    return {"status": "ok", "message": "DevNote API v2 is running"}
+    return {"status": "ok", "message": "Quill API v2 is running"}
 
 
 @app.get("/health", tags=["Health"])
