@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from jose import JWTError, jwt
@@ -9,7 +9,7 @@ from fastapi.security import OAuth2PasswordBearer
 from core.config import settings
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")  # ← Fixed path
 
 
 def hash_password(password: str) -> str:
@@ -22,7 +22,7 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     to_encode = data.copy()
-    expire = datetime.utcnow() + (
+    expire = datetime.now(timezone.utc) + ( 
         expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     )
     to_encode.update({"exp": expire})
@@ -40,7 +40,6 @@ def decode_token(token: str) -> dict:
         )
 
 
-# Dependency — get current user from DB
 from db.database import get_db
 from sqlalchemy.orm import Session
 from models.user import User
