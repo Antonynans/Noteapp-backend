@@ -3,7 +3,8 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Request
+from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 from PIL import Image
 
@@ -11,17 +12,65 @@ from db.database import get_db
 from models.user import User
 from schemas.auth import (
     SignUpRequest, LoginRequest, TokenResponse, UserResponse,
-    ProfileUpdate, PasswordResetRequest, PasswordResetConfirm, ChangePasswordRequest
+    ProfileUpdate, PasswordResetRequest, PasswordResetConfirm,
+    ChangePasswordRequest, RefreshTokenRequest, AccessTokenResponse,
+    ResendVerificationRequest,
 )
-from core.security import hash_password, verify_password, create_access_token, get_current_user
+from core.security import (
+    hash_password, verify_password,
+    create_access_token, create_refresh_token,
+    decode_refresh_token, get_current_user,
+    revoke_token, is_token_revoked,
+)
 from core.config import settings
+from core.limiter import limiter
 
 router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 
+ACCESS_EXPIRE_SECONDS = settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+VERIFICATION_TOKEN_EXPIRE_HOURS = 24
 
-@router.post("/signup", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
-def sign_up(payload: SignUpRequest, db: Session = Depends(get_db)):
-    """Register a new user account."""
+
+def _issue_tokens(user: User, db: Session) -> dict:
+    """Issue a fresh access + refresh token pair for a user."""
+    jti = str(uuid.uuid4())
+    access_token = create_access_token({"sub": str(user.id), "jti": jti})
+    refresh_token = create_refresh_token({"sub": str(user.id)})
+    user.hashed_refresh_token = hash_password(refresh_token)
+    db.commit()
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+        "expires_in": ACCESS_EXPIRE_SECONDS,
+    }
+
+
+async def _send_verification(user: User, db: Session):
+    """Generate a verification token and send the email."""
+    token = secrets.token_urlsafe(32)
+    user.verification_token = token
+    user.verification_token_expires = datetime.now(timezone.utc) + timedelta(
+        hours=VERIFICATION_TOKEN_EXPIRE_HOURS
+    )
+    db.commit()
+    try:
+        from core.email import send_verification_email
+        await send_verification_email(user.email, token, user.full_name)
+    except Exception:
+        pass  
+
+
+
+@router.post("/signup", status_code=201)
+@limiter.limit("10/minute")
+async def sign_up(request: Request, payload: SignUpRequest, db: Session = Depends(get_db)):
+    """
+    Register a new account.
+    - Creates the user as unverified
+    - Sends a verification email
+    - Returns a message (no tokens yet — user must verify first)
+    """
     existing = db.query(User).filter(User.email == payload.email).first()
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -30,27 +79,162 @@ def sign_up(payload: SignUpRequest, db: Session = Depends(get_db)):
         email=payload.email,
         hashed_password=hash_password(payload.password),
         full_name=payload.full_name,
+        is_verified=False,
     )
     db.add(user)
     db.commit()
     db.refresh(user)
-    token = create_access_token({"sub": str(user.id)})
-    return {"access_token": token, "token_type": "bearer"}
+
+    await _send_verification(user, db)
+
+    return {
+        "message": "Account created. Please check your email to verify your account.",
+        "email": user.email,
+    }
+
+
+
+@router.get("/verify-email", response_class=HTMLResponse)
+def verify_email(token: str, db: Session = Depends(get_db)):
+    """
+    Confirm email using the token from the verification link.
+    Returns a simple HTML page — the user can then go to the login screen.
+    """
+    user = db.query(User).filter(User.verification_token == token).first()
+
+    if not user:
+        return HTMLResponse(_verification_page(
+            success=False,
+            message="Invalid verification link. It may have already been used.",
+        ), status_code=400)
+
+    if not user.verification_token_expires:
+        return HTMLResponse(_verification_page(
+            success=False,
+            message="Verification link is invalid.",
+        ), status_code=400)
+
+    expires = user.verification_token_expires
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+
+    if datetime.now(timezone.utc) > expires:
+        return HTMLResponse(_verification_page(
+            success=False,
+            message="Verification link has expired. Please request a new one.",
+        ), status_code=400)
+
+   
+    user.is_verified = True
+    user.verification_token = None
+    user.verification_token_expires = None
+    db.commit()
+
+    return HTMLResponse(_verification_page(
+        success=True,
+        message="Your email has been verified. You can now log in.",
+    ))
+
+
+@router.post("/resend-verification")
+@limiter.limit("5/minute")
+async def resend_verification(
+    request: Request,
+    payload: ResendVerificationRequest,
+    db: Session = Depends(get_db),
+):
+    """Resend the verification email. Rate limited to prevent abuse."""
+    user = db.query(User).filter(User.email == payload.email).first()
+
+    if not user:
+        return {"message": "If that email exists and is unverified, a new link has been sent."}
+
+    if user.is_verified:
+        raise HTTPException(status_code=400, detail="This account is already verified.")
+
+    await _send_verification(user, db)
+    return {"message": "If that email exists and is unverified, a new link has been sent."}
+
 
 
 @router.post("/login", response_model=TokenResponse)
-def login(payload: LoginRequest, db: Session = Depends(get_db)):
-    """Log in with email and password."""
-    user = db.query(User).filter(User.email == payload.email).first()
+@limiter.limit("10/minute")
+def login(request: Request, payload: LoginRequest, db: Session = Depends(get_db)):
+    """
+    Login with email and password.
+    - Blocked if account is not verified
+    - Returns access + refresh tokens on success
+    """
+    user = db.query(User).filter(User.email == payload.email, User.is_active == True).first()
+
     if not user or not verify_password(payload.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid email or password")
-    token = create_access_token({"sub": str(user.id)})
-    return {"access_token": token, "token_type": "bearer"}
+
+    if not user.is_verified:
+        raise HTTPException(
+            status_code=403,
+            detail="Email not verified. Please check your inbox or request a new verification link.",
+        )
+
+    return _issue_tokens(user, db)
+
+
+
+@router.post("/refresh", response_model=AccessTokenResponse)
+@limiter.limit("30/minute")
+def refresh_access_token(
+    request: Request,
+    payload: RefreshTokenRequest,
+    db: Session = Depends(get_db),
+):
+    """Exchange a valid refresh token for a new access token (token rotation)."""
+    token_data = decode_refresh_token(payload.refresh_token)
+    user_id = token_data.get("sub")
+
+    user = db.query(User).filter(User.id == int(user_id), User.is_active == True).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    if not user.hashed_refresh_token or not verify_password(
+        payload.refresh_token, user.hashed_refresh_token
+    ):
+        user.hashed_refresh_token = None
+        db.commit()
+        raise HTTPException(
+            status_code=401,
+            detail="Refresh token reuse detected. Please log in again.",
+        )
+
+    tokens = _issue_tokens(user, db)
+    return {
+        "access_token": tokens["access_token"],
+        "token_type": "bearer",
+        "expires_in": ACCESS_EXPIRE_SECONDS,
+    }
+
+
+@router.post("/logout")
+def logout(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Logout — invalidates the current refresh token."""
+    current_user.hashed_refresh_token = None
+    db.commit()
+    return {"message": "Logged out successfully"}
+
+
+@router.post("/logout-all")
+def logout_all_devices(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Logout from all devices by invalidating the refresh token."""
+    current_user.hashed_refresh_token = None
+    db.commit()
+    return {"message": "Logged out from all devices"}
+
 
 
 @router.get("/me", response_model=UserResponse)
 def get_me(current_user: User = Depends(get_current_user)):
-    """Get current authenticated user."""
     return current_user
 
 
@@ -60,7 +244,6 @@ def update_profile(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Update profile name and bio."""
     if payload.full_name is not None:
         current_user.full_name = payload.full_name
     if payload.bio is not None:
@@ -71,12 +254,13 @@ def update_profile(
 
 
 @router.post("/me/avatar", response_model=UserResponse)
+@limiter.limit("10/minute")
 async def upload_avatar(
+    request: Request,
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Upload a profile avatar image (JPEG or PNG, max 5MB)."""
     if file.content_type not in ("image/jpeg", "image/png"):
         raise HTTPException(status_code=400, detail="Only JPEG and PNG images are allowed")
 
@@ -110,19 +294,25 @@ def change_password(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Change password while logged in."""
     if not verify_password(payload.current_password, current_user.hashed_password):
         raise HTTPException(status_code=400, detail="Current password is incorrect")
     current_user.hashed_password = hash_password(payload.new_password)
+    current_user.hashed_refresh_token = None  
     db.commit()
-    return {"message": "Password changed successfully"}
+    return {"message": "Password changed. Please log in again."}
+
+
 
 
 @router.post("/forgot-password")
-async def forgot_password(payload: PasswordResetRequest, db: Session = Depends(get_db)):
-    """Send a password reset email."""
+@limiter.limit("5/minute")
+async def forgot_password(
+    request: Request,
+    payload: PasswordResetRequest,
+    db: Session = Depends(get_db),
+):
     user = db.query(User).filter(User.email == payload.email).first()
-    if user:
+    if user and user.is_verified:
         token = secrets.token_urlsafe(32)
         user.reset_token = token
         user.reset_token_expires = datetime.now(timezone.utc) + timedelta(hours=1)
@@ -131,23 +321,72 @@ async def forgot_password(payload: PasswordResetRequest, db: Session = Depends(g
             from core.email import send_password_reset_email
             await send_password_reset_email(user.email, token)
         except Exception:
-            pass  
+            pass
     return {"message": "If that email exists, a reset link has been sent"}
 
 
 @router.post("/reset-password")
 def reset_password(payload: PasswordResetConfirm, db: Session = Depends(get_db)):
-    """Reset password using the token from the email."""
     user = db.query(User).filter(User.reset_token == payload.token).first()
     if not user or not user.reset_token_expires:
         raise HTTPException(status_code=400, detail="Invalid or expired reset token")
 
-    if datetime.now(timezone.utc) > user.reset_token_expires.replace(tzinfo=timezone.utc):
+    expires = user.reset_token_expires
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+
+    if datetime.now(timezone.utc) > expires:
         raise HTTPException(status_code=400, detail="Reset token has expired")
 
     user.hashed_password = hash_password(payload.new_password)
     user.reset_token = None
     user.reset_token_expires = None
+    user.hashed_refresh_token = None
     db.commit()
-    return {"message": "Password reset successfully"}
+    return {"message": "Password reset successfully. Please log in."}
 
+
+
+def _verification_page(success: bool, message: str) -> str:
+    colour = "#16a34a" if success else "#dc2626"
+    icon = "✓" if success else "✗"
+    title = "Email Verified" if success else "Verification Failed"
+    login_btn = """
+      <a href="/" style="display:inline-block;margin-top:24px;background:#f97316;
+         color:white;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:bold;">
+        Go to Login
+      </a>
+    """ if success else """
+      <a href="/resend" style="display:inline-block;margin-top:24px;background:#f97316;
+         color:white;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:bold;">
+        Resend Verification
+      </a>
+    """
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8"/>
+      <meta name="viewport" content="width=device-width,initial-scale=1"/>
+      <title>{title}</title>
+      <style>
+        body {{ font-family: Arial, sans-serif; display: flex; align-items: center;
+               justify-content: center; min-height: 100vh; margin: 0; background: #f9fafb; }}
+        .card {{ background: white; border-radius: 12px; padding: 48px 40px;
+                 text-align: center; box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+                 max-width: 400px; width: 90%; }}
+        .icon {{ font-size: 48px; color: {colour}; }}
+        h1 {{ color: #111827; margin: 16px 0 8px; font-size: 22px; }}
+        p {{ color: #6b7280; line-height: 1.6; }}
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <div class="icon">{icon}</div>
+        <h1>{title}</h1>
+        <p>{message}</p>
+        {login_btn}
+      </div>
+    </body>
+    </html>
+    """
