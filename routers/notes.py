@@ -4,9 +4,10 @@ import markdown
 import bleach
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
+from core.limiter import limiter
 
 from db.database import get_db
 from models.note import Note
@@ -159,7 +160,7 @@ def create_note(
     db: Session = Depends(get_db),
 ):
     """Create a new note with optional markdown, colour, tags, and reminder."""
-    # Increment positions of all existing notes to make room for new one at position 1
+    
     db.query(Note).filter(
         Note.owner_id == current_user.id,
         Note.is_deleted == False,
