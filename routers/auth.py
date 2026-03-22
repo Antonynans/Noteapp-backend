@@ -94,46 +94,42 @@ async def sign_up(request: Request, payload: SignUpRequest, db: Session = Depend
 
 
 
-@router.get("/verify-email", response_class=HTMLResponse)
+@router.get("/verify-email")
 def verify_email(token: str, db: Session = Depends(get_db)):
     """
     Confirm email using the token from the verification link.
-    Returns a simple HTML page — the user can then go to the login screen.
+    Returns JSON response for frontend to handle.
     """
     user = db.query(User).filter(User.verification_token == token).first()
 
     if not user:
-        return HTMLResponse(_verification_page(
-            success=False,
-            message="Invalid verification link. It may have already been used.",
-        ), status_code=400)
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid verification link. It may have already been used."
+        )
 
     if not user.verification_token_expires:
-        return HTMLResponse(_verification_page(
-            success=False,
-            message="Verification link is invalid.",
-        ), status_code=400)
+        raise HTTPException(
+            status_code=400,
+            detail="Verification link is invalid."
+        )
 
     expires = user.verification_token_expires
     if expires.tzinfo is None:
         expires = expires.replace(tzinfo=timezone.utc)
 
     if datetime.now(timezone.utc) > expires:
-        return HTMLResponse(_verification_page(
-            success=False,
-            message="Verification link has expired. Please request a new one.",
-        ), status_code=400)
+        raise HTTPException(
+            status_code=400,
+            detail="Verification link has expired. Please request a new one."
+        )
 
-   
     user.is_verified = True
     user.verification_token = None
     user.verification_token_expires = None
     db.commit()
 
-    return HTMLResponse(_verification_page(
-        success=True,
-        message="Your email has been verified. You can now log in.",
-    ))
+    return {"message": "Your email has been verified. You can now log in."}
 
 
 @router.post("/resend-verification")
@@ -347,46 +343,4 @@ def reset_password(payload: PasswordResetConfirm, db: Session = Depends(get_db))
 
 
 
-def _verification_page(success: bool, message: str) -> str:
-    colour = "#16a34a" if success else "#dc2626"
-    icon = "✓" if success else "✗"
-    title = "Email Verified" if success else "Verification Failed"
-    login_btn = """
-      <a href="/" style="display:inline-block;margin-top:24px;background:#f97316;
-         color:white;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:bold;">
-        Go to Login
-      </a>
-    """ if success else """
-      <a href="/resend" style="display:inline-block;margin-top:24px;background:#f97316;
-         color:white;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:bold;">
-        Resend Verification
-      </a>
-    """
-    return f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <meta charset="utf-8"/>
-      <meta name="viewport" content="width=device-width,initial-scale=1"/>
-      <title>{title}</title>
-      <style>
-        body {{ font-family: Arial, sans-serif; display: flex; align-items: center;
-               justify-content: center; min-height: 100vh; margin: 0; background: #f9fafb; }}
-        .card {{ background: white; border-radius: 12px; padding: 48px 40px;
-                 text-align: center; box-shadow: 0 4px 24px rgba(0,0,0,0.08);
-                 max-width: 400px; width: 90%; }}
-        .icon {{ font-size: 48px; color: {colour}; }}
-        h1 {{ color: #111827; margin: 16px 0 8px; font-size: 22px; }}
-        p {{ color: #6b7280; line-height: 1.6; }}
-      </style>
-    </head>
-    <body>
-      <div class="card">
-        <div class="icon">{icon}</div>
-        <h1>{title}</h1>
-        <p>{message}</p>
-        {login_btn}
-      </div>
-    </body>
-    </html>
-    """
+
