@@ -30,7 +30,7 @@ def _send_email(to_email: str, subject: str, html_body: str):
 
 
 async def send_verification_email(email: str, token: str, full_name: str = None):
-    verify_url = f"{settings.BASE_URL}/api/auth/verify-email?token={token}"
+    verify_url = f"{settings.FRONTEND_URL}/auth/verify-email?token={token}"
     name = full_name or "there"
 
     body = f"""
