@@ -17,8 +17,6 @@ class Settings(BaseSettings):
     RATE_LIMIT_PER_MINUTE: int = 60
     AUTH_RATE_LIMIT_PER_MINUTE: int = 10
 
-    RESEND_API_KEY: str = ""
-
     GMAIL_USERNAME: str = Field("", env="GMAIL_USERNAME")
     GMAIL_APP_PASSWORD: str = Field("", env="GMAIL_APP_PASSWORD")
 
@@ -30,7 +28,7 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = ".env"
-        extra = "ignore"  # allow additional env variables without failing
+        extra = "ignore"  
         case_sensitive = False
 
 
