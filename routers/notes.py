@@ -103,7 +103,7 @@ def move_note_to_first(note: Note, user: User, db: Session) -> None:
 @router.get("", response_model=PaginatedNotes)
 def list_notes(
     page: int = Query(1, ge=1),
-    page_size: int = Query(10, ge=1, le=50),
+    page_size: int = Query(12, ge=1, le=50),
     search: str = Query(None, description="Search title, description, or tags"),
     colour: str = Query(None, description="Filter by colour hex"),
     tag: str = Query(None, description="Filter by tag"),
@@ -186,7 +186,7 @@ def create_note(
 @router.get("/trash", response_model=PaginatedNotes)
 def list_trash(
     page: int = Query(1, ge=1),
-    page_size: int = Query(10, ge=1, le=50),
+    page_size: int = Query(12, ge=1, le=50),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -225,39 +225,54 @@ def update_note(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Update a note."""
     note = get_note_or_404(note_id, current_user, db)
 
     if note.is_locked:
         raise HTTPException(status_code=403, detail="Unlock the note before editing")
 
+    content_changed = False
+
     if payload.position is not None:
         move_note_to_position(note, payload.position, current_user, db)
-    else:
-        is_updating_content = any([
-            payload.title is not None,
-            payload.description is not None,
-            payload.colour is not None,
-            payload.tags is not None,
-            payload.reminder_at is not None,
-        ])
-        if is_updating_content:
-            move_note_to_first(note, current_user, db)
+    # else:
+    #     is_updating_content = any([
+    #         payload.title is not None,
+    #         payload.description is not None,
+    #         payload.colour is not None,
+    #         payload.tags is not None,
+    #         payload.reminder_at is not None,
+    #     ])
+    #     if is_updating_content:
+    #         move_note_to_first(note, current_user, db)
 
-    if payload.title is not None:
+    if payload.title is not None and payload.title != note.title:
         note.title = payload.title
-    if payload.description is not None:
+        content_changed = True
+
+    if payload.description is not None and payload.description != note.description:
         note.description = payload.description
         note.description_html = render_markdown(payload.description)
-    if payload.colour is not None:
+        content_changed = True
+
+    if payload.colour is not None and payload.colour != note.colour:
         note.colour = payload.colour
+        content_changed = True
+
     if payload.tags is not None:
-        note.tags = ",".join(payload.tags)
-    if payload.reminder_at is not None:
+        new_tags = ",".join(payload.tags)
+        if new_tags != (note.tags or ""):
+            note.tags = new_tags
+            content_changed = True
+
+    if payload.reminder_at is not None and payload.reminder_at != note.reminder_at:
         note.reminder_at = payload.reminder_at
         note.reminder_sent = False
+        content_changed = True
 
-    note.status = "Updated"
+    if content_changed:
+        note.edited_at = datetime.now(timezone.utc)
+        note.status = "Edited"
+    
     db.commit()
     db.refresh(note)
     return serialize_note(note)
