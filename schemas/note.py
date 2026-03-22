@@ -45,6 +45,7 @@ class NoteResponse(BaseModel):
     reminder_at: Optional[datetime]
     reminder_sent: bool
     owner_id: int
+    edited_at: Optional[datetime]
     created_at: datetime
     updated_at: Optional[datetime]
 
@@ -69,6 +70,7 @@ class NoteResponse(BaseModel):
             "reminder_at": note.reminder_at,
             "reminder_sent": note.reminder_sent,
             "owner_id": note.owner_id,
+             "edited_at": note.edited_at,
             "created_at": note.created_at,
             "updated_at": note.updated_at,
         }
@@ -88,6 +90,7 @@ class SharedNoteResponse(BaseModel):
     title: str
     description_html: Optional[str]
     colour: str
+    edited_at: Optional[datetime]
     created_at: datetime
     updated_at: Optional[datetime]
 
