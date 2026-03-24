@@ -20,12 +20,6 @@ from core.security import get_current_user, hash_password, verify_password
 
 router = APIRouter(prefix="/api/notes", tags=["Notes"])
 
-ALLOWED_COLOURS = {
-    "#ffffff", "#fef9c3", "#dcfce7", "#dbeafe",
-    "#fce7f3", "#ede9fe", "#ffedd5", "#f1f5f9"
-}
-
-
 def render_markdown(text: str) -> str:
     """Convert markdown to sanitized HTML."""
     raw_html = markdown.markdown(text, extensions=["fenced_code", "tables", "nl2br"])
