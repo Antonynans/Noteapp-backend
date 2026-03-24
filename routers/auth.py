@@ -10,11 +10,12 @@ from PIL import Image
 
 from db.database import get_db
 from models.user import User
+from models.session import UserSession
 from schemas.auth import (
     SignUpRequest, LoginRequest, TokenResponse, UserResponse,
     ProfileUpdate, PasswordResetRequest, PasswordResetConfirm,
     ChangePasswordRequest, RefreshTokenRequest, AccessTokenResponse,
-    ResendVerificationRequest,
+    ResendVerificationRequest, UserSessionResponse, LogoutSessionRequest,
 )
 from core.security import (
     hash_password, verify_password,
@@ -31,18 +32,59 @@ ACCESS_EXPIRE_SECONDS = settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
 VERIFICATION_TOKEN_EXPIRE_HOURS = 24
 
 
-def _issue_tokens(user: User, db: Session) -> dict:
+def _get_device_type(user_agent: str) -> str:
+    """Extract device type from user agent string."""
+    ua = user_agent.lower()
+    if "mobile" in ua or "android" in ua or "iphone" in ua:
+        return "mobile"
+    elif "tablet" in ua or "ipad" in ua:
+        return "tablet"
+    else:
+        return "desktop"
+
+
+def _get_device_name(user_agent: str) -> str:
+    """Extract a readable device name from user agent string."""
+    ua = user_agent.lower()
+    if "chrome" in ua and "edg" not in ua:
+        return "Chrome"
+    elif "firefox" in ua:
+        return "Firefox"
+    elif "safari" in ua and "chrome" not in ua:
+        return "Safari"
+    elif "edg" in ua:
+        return "Edge"
+    elif "opera" in ua:
+        return "Opera"
+    else:
+        return "Unknown Browser"
+
+
+def _issue_tokens(user: User, db: Session, device_info: dict = None) -> dict:
     """Issue a fresh access + refresh token pair for a user."""
     jti = str(uuid.uuid4())
     access_token = create_access_token({"sub": str(user.id), "jti": jti})
     refresh_token = create_refresh_token({"sub": str(user.id)})
-    user.hashed_refresh_token = hash_password(refresh_token)
+
+    session = UserSession(
+        user_id=user.id,
+        hashed_refresh_token=hash_password(refresh_token),
+        device_name=device_info.get("device_name") if device_info else None,
+        device_type=device_info.get("device_type") if device_info else None,
+        ip_address=device_info.get("ip_address") if device_info else None,
+        user_agent=device_info.get("user_agent") if device_info else None,
+        expires_at=datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS),
+    )
+    db.add(session)
     db.commit()
+    db.refresh(session)
+
     return {
         "access_token": access_token,
         "refresh_token": refresh_token,
         "token_type": "bearer",
         "expires_in": ACCESS_EXPIRE_SECONDS,
+        "session_id": session.id,
     }
 
 
@@ -172,7 +214,14 @@ def login(request: Request, payload: LoginRequest, db: Session = Depends(get_db)
             detail="Email not verified. Please check your inbox or request a new verification link.",
         )
 
-    return _issue_tokens(user, db)
+    device_info = {
+        "ip_address": request.client.host if request.client else None,
+        "user_agent": request.headers.get("user-agent"),
+        "device_type": _get_device_type(request.headers.get("user-agent", "")),
+        "device_name": _get_device_name(request.headers.get("user-agent", "")),
+    }
+
+    return _issue_tokens(user, db, device_info)
 
 
 
@@ -195,13 +244,19 @@ def refresh_access_token(
         payload.refresh_token, user.hashed_refresh_token
     ):
         user.hashed_refresh_token = None
+        db.query(UserSession).filter(UserSession.user_id == user.id).update({"is_active": False})
         db.commit()
         raise HTTPException(
             status_code=401,
             detail="Refresh token reuse detected. Please log in again.",
         )
 
-    tokens = _issue_tokens(user, db)
+    tokens = _issue_tokens(user, db, {
+        "ip_address": request.client.host if request.client else None,
+        "user_agent": request.headers.get("user-agent"),
+        "device_type": _get_device_type(request.headers.get("user-agent", "")),
+        "device_name": _get_device_name(request.headers.get("user-agent", "")),
+    })
     return {
         "access_token": tokens["access_token"],
         "token_type": "bearer",
@@ -213,6 +268,7 @@ def refresh_access_token(
 def logout(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Logout — invalidates the current refresh token."""
     current_user.hashed_refresh_token = None
+    db.query(UserSession).filter(UserSession.user_id == current_user.id).update({"is_active": False})
     db.commit()
     return {"message": "Logged out successfully"}
 
@@ -224,8 +280,55 @@ def logout_all_devices(
 ):
     """Logout from all devices by invalidating the refresh token."""
     current_user.hashed_refresh_token = None
+    db.query(UserSession).filter(UserSession.user_id == current_user.id).update({"is_active": False})
     db.commit()
     return {"message": "Logged out from all devices"}
+
+
+@router.get("/sessions", response_model=list[UserSessionResponse])
+def get_user_sessions(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Get all active sessions for the current user."""
+    sessions = db.query(UserSession).filter(
+        UserSession.user_id == current_user.id,
+        UserSession.is_active == True,
+    ).order_by(UserSession.created_at.desc()).all()
+
+    return [
+        UserSessionResponse(
+            id=session.id,
+            device_name=session.device_name,
+            device_type=session.device_type,
+            ip_address=session.ip_address,
+            user_agent=session.user_agent,
+            is_active=session.is_active,
+            last_used_at=session.last_used_at.isoformat() if session.last_used_at else None,
+            created_at=session.created_at.isoformat(),
+        )
+        for session in sessions
+    ]
+
+
+@router.post("/sessions/{session_id}/logout")
+def logout_session(
+    session_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Logout from a specific session."""
+    session = db.query(UserSession).filter(
+        UserSession.id == session_id,
+        UserSession.user_id == current_user.id,
+    ).first()
+
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    session.is_active = False
+    db.commit()
+    return {"message": "Session logged out successfully"}
 
 
 
