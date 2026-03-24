@@ -49,6 +49,21 @@ class UserResponse(BaseModel):
     bio: Optional[str]
     is_active: bool
 
+
+class UserSessionResponse(BaseModel):
+    id: int
+    device_name: Optional[str]
+    device_type: Optional[str]
+    ip_address: Optional[str]
+    user_agent: Optional[str]
+    is_active: bool
+    last_used_at: Optional[str]
+    created_at: str
+
+
+class LogoutSessionRequest(BaseModel):
+    session_id: int
+
     class Config:
         from_attributes = True
 
