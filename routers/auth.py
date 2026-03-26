@@ -4,7 +4,6 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Request
-from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 from PIL import Image
 
@@ -22,6 +21,7 @@ from core.security import (
     create_access_token, create_refresh_token,
     decode_refresh_token, get_current_user,
     revoke_token, is_token_revoked,
+    revoke_all_user_tokens,
 )
 from core.config import settings
 from core.limiter import limiter
@@ -30,6 +30,7 @@ router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 
 ACCESS_EXPIRE_SECONDS = settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
 VERIFICATION_TOKEN_EXPIRE_HOURS = 24
+
 
 
 def _get_device_type(user_agent: str) -> str:
@@ -60,8 +61,19 @@ def _get_device_name(user_agent: str) -> str:
         return "Unknown Browser"
 
 
+def _get_device_info(request: Request) -> dict:
+    """Extract device metadata from the incoming request."""
+    ua = request.headers.get("user-agent", "")
+    return {
+        "ip_address": request.client.host if request.client else None,
+        "user_agent": ua,
+        "device_type": _get_device_type(ua),
+        "device_name": _get_device_name(ua),
+    }
+
+
 def _issue_tokens(user: User, db: Session, device_info: dict = None) -> dict:
-    """Issue a fresh access + refresh token pair for a user."""
+    """Issue a fresh access + refresh token pair and persist a new session row."""
     jti = str(uuid.uuid4())
     access_token = create_access_token({"sub": str(user.id), "jti": jti})
     refresh_token = create_refresh_token({"sub": str(user.id)})
@@ -100,7 +112,7 @@ async def _send_verification(user: User, db: Session):
         from core.email import send_verification_email
         await send_verification_email(user.email, token, user.full_name)
     except Exception:
-        pass  
+        pass
 
 
 
@@ -135,26 +147,19 @@ async def sign_up(request: Request, payload: SignUpRequest, db: Session = Depend
     }
 
 
-
 @router.get("/verify-email")
 def verify_email(token: str, db: Session = Depends(get_db)):
-    """
-    Confirm email using the token from the verification link.
-    Returns JSON response for frontend to handle.
-    """
+    """Confirm email using the token from the verification link."""
     user = db.query(User).filter(User.verification_token == token).first()
 
     if not user:
         raise HTTPException(
             status_code=400,
-            detail="Invalid verification link. It may have already been used."
+            detail="Invalid verification link. It may have already been used.",
         )
 
     if not user.verification_token_expires:
-        raise HTTPException(
-            status_code=400,
-            detail="Verification link is invalid."
-        )
+        raise HTTPException(status_code=400, detail="Verification link is invalid.")
 
     expires = user.verification_token_expires
     if expires.tzinfo is None:
@@ -163,7 +168,7 @@ def verify_email(token: str, db: Session = Depends(get_db)):
     if datetime.now(timezone.utc) > expires:
         raise HTTPException(
             status_code=400,
-            detail="Verification link has expired. Please request a new one."
+            detail="Verification link has expired. Please request a new one.",
         )
 
     user.is_verified = True
@@ -214,15 +219,7 @@ def login(request: Request, payload: LoginRequest, db: Session = Depends(get_db)
             detail="Email not verified. Please check your inbox or request a new verification link.",
         )
 
-    device_info = {
-        "ip_address": request.client.host if request.client else None,
-        "user_agent": request.headers.get("user-agent"),
-        "device_type": _get_device_type(request.headers.get("user-agent", "")),
-        "device_name": _get_device_name(request.headers.get("user-agent", "")),
-    }
-
-    return _issue_tokens(user, db, device_info)
-
+    return _issue_tokens(user, db, _get_device_info(request))
 
 
 @router.post("/refresh", response_model=AccessTokenResponse)
@@ -232,7 +229,10 @@ def refresh_access_token(
     payload: RefreshTokenRequest,
     db: Session = Depends(get_db),
 ):
-    """Exchange a valid refresh token for a new access token (token rotation)."""
+    """
+    Exchange a valid refresh token for a new access + refresh token pair
+    (token rotation). The old session is retired on success.
+    """
     token_data = decode_refresh_token(payload.refresh_token)
     user_id = token_data.get("sub")
 
@@ -240,49 +240,93 @@ def refresh_access_token(
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
 
-    if not user.hashed_refresh_token or not verify_password(
-        payload.refresh_token, user.hashed_refresh_token
-    ):
-        user.hashed_refresh_token = None
-        db.query(UserSession).filter(UserSession.user_id == user.id).update({"is_active": False})
+   
+    active_sessions = db.query(UserSession).filter(
+        UserSession.user_id == user.id,
+        UserSession.is_active == True,
+        UserSession.expires_at > datetime.now(timezone.utc),
+    ).all()
+
+    matched_session = next(
+        (s for s in active_sessions if verify_password(payload.refresh_token, s.hashed_refresh_token)),
+        None,
+    )
+
+    if not matched_session:
+      
+        db.query(UserSession).filter(
+            UserSession.user_id == user.id
+        ).update({"is_active": False})
         db.commit()
         raise HTTPException(
             status_code=401,
-            detail="Refresh token reuse detected. Please log in again.",
+            detail="Refresh token is invalid or has already been used. Please log in again.",
         )
 
-    tokens = _issue_tokens(user, db, {
-        "ip_address": request.client.host if request.client else None,
-        "user_agent": request.headers.get("user-agent"),
-        "device_type": _get_device_type(request.headers.get("user-agent", "")),
-        "device_name": _get_device_name(request.headers.get("user-agent", "")),
-    })
-    return {
-        "access_token": tokens["access_token"],
-        "token_type": "bearer",
-        "expires_in": ACCESS_EXPIRE_SECONDS,
-    }
+    matched_session.is_active = False
+    db.commit()
+
+    return _issue_tokens(user, db, _get_device_info(request))
+
 
 
 @router.post("/logout")
-def logout(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Logout — invalidates the current refresh token."""
-    current_user.hashed_refresh_token = None
-    db.query(UserSession).filter(UserSession.user_id == current_user.id).update({"is_active": False})
+def logout(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Logout the current device.
+    - Deactivates all sessions for the user (we don't track which session
+      belongs to the current access token, so deactivating all is safe).
+    - Revokes the current access token via its JTI so it can't be reused
+      during its remaining lifetime.
+    """
+    from core.security import decode_access_token
+    auth_header = request.headers.get("authorization", "")
+    raw_token = auth_header.removeprefix("Bearer ").strip()
+
+    
+    try:
+        payload = decode_access_token(raw_token)
+        jti = payload.get("jti")
+        if jti:
+            revoke_token(jti, expires_in_seconds=ACCESS_EXPIRE_SECONDS)
+    except Exception:
+        pass  
+
+    db.query(UserSession).filter(
+        UserSession.user_id == current_user.id
+    ).update({"is_active": False})
     db.commit()
+
     return {"message": "Logged out successfully"}
 
 
 @router.post("/logout-all")
 def logout_all_devices(
+    request: Request,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Logout from all devices by invalidating the refresh token."""
-    current_user.hashed_refresh_token = None
-    db.query(UserSession).filter(UserSession.user_id == current_user.id).update({"is_active": False})
+    """
+    Logout from every device simultaneously.
+    - Deactivates all UserSession rows  → blocks all refresh tokens
+    - Writes a Redis 'revoked_all' timestamp → blocks all current access
+      tokens (checked in get_current_user via is_user_token_revoked)
+    """
+    
+    db.query(UserSession).filter(
+        UserSession.user_id == current_user.id
+    ).update({"is_active": False})
     db.commit()
+
+    
+    revoke_all_user_tokens(current_user.id, expires_in_seconds=ACCESS_EXPIRE_SECONDS)
+
     return {"message": "Logged out from all devices"}
+
 
 
 @router.get("/sessions", response_model=list[UserSessionResponse])
@@ -317,7 +361,7 @@ def logout_session(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Logout from a specific session."""
+    """Logout from a specific session by ID."""
     session = db.query(UserSession).filter(
         UserSession.id == session_id,
         UserSession.user_id == current_user.id,
@@ -381,7 +425,7 @@ async def upload_avatar(
         if os.path.exists(old_path):
             os.remove(old_path)
 
-    current_user.avatar_url = f"/{filepath}"
+    current_user.avatar_url = f"/uploads/avatars/{filename}"
     db.commit()
     db.refresh(current_user)
     return current_user
@@ -395,11 +439,18 @@ def change_password(
 ):
     if not verify_password(payload.current_password, current_user.hashed_password):
         raise HTTPException(status_code=400, detail="Current password is incorrect")
-    current_user.hashed_password = hash_password(payload.new_password)
-    current_user.hashed_refresh_token = None  
-    db.commit()
-    return {"message": "Password changed. Please log in again."}
 
+    current_user.hashed_password = hash_password(payload.new_password)
+
+    
+    db.query(UserSession).filter(
+        UserSession.user_id == current_user.id
+    ).update({"is_active": False})
+    db.commit()
+
+    revoke_all_user_tokens(current_user.id, expires_in_seconds=ACCESS_EXPIRE_SECONDS)
+
+    return {"message": "Password changed. Please log in again."}
 
 
 
@@ -440,10 +491,13 @@ def reset_password(payload: PasswordResetConfirm, db: Session = Depends(get_db))
     user.hashed_password = hash_password(payload.new_password)
     user.reset_token = None
     user.reset_token_expires = None
-    user.hashed_refresh_token = None
+
+    
+    db.query(UserSession).filter(
+        UserSession.user_id == user.id
+    ).update({"is_active": False})
     db.commit()
+
+    revoke_all_user_tokens(user.id, expires_in_seconds=ACCESS_EXPIRE_SECONDS)
+
     return {"message": "Password reset successfully. Please log in."}
-
-
-
-
