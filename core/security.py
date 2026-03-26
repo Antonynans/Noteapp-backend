@@ -3,10 +3,14 @@ from typing import Optional
 
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from fastapi import Depends, HTTPException, status, Request
+from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
+from db.database import get_db
+from sqlalchemy.orm import Session
+from models.user import User
 
 from core.config import settings
+
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
@@ -23,17 +27,13 @@ def hash_password(password: str) -> str:
 def verify_password(plain: str, hashed: str) -> bool:
     return pwd_context.verify(plain, hashed)
 
-
-
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     to_encode = data.copy()
     to_encode["type"] = TOKEN_TYPE_ACCESS
-    expire = datetime.now(timezone.utc) + (
-        expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    )
-    to_encode["exp"] = expire
+    now = datetime.now(timezone.utc)
+    to_encode["iat"] = now  
+    to_encode["exp"] = now + (expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES))
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
-
 
 def create_refresh_token(data: dict) -> str:
     to_encode = data.copy()
@@ -41,8 +41,6 @@ def create_refresh_token(data: dict) -> str:
     expire = datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
     to_encode["exp"] = expire
     return jwt.encode(to_encode, settings.REFRESH_SECRET_KEY, algorithm=settings.ALGORITHM)
-
-
 
 def decode_access_token(token: str) -> dict:
     try:
@@ -57,7 +55,6 @@ def decode_access_token(token: str) -> dict:
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-
 def decode_refresh_token(token: str) -> dict:
     try:
         payload = jwt.decode(token, settings.REFRESH_SECRET_KEY, algorithms=[settings.ALGORITHM])
@@ -70,7 +67,6 @@ def decode_refresh_token(token: str) -> dict:
             detail="Invalid or expired refresh token",
         )
 
-
 def get_redis():
     """Get Redis client — falls back gracefully if Redis is unavailable."""
     try:
@@ -81,27 +77,50 @@ def get_redis():
     except Exception:
         return None
 
-
 def revoke_token(jti: str, expires_in_seconds: int):
-    """Add token JTI to Redis blocklist."""
+    """Add a single token's JTI to the Redis blocklist."""
     r = get_redis()
     if r:
         r.setex(f"revoked:{jti}", expires_in_seconds, "1")
 
-
 def is_token_revoked(jti: str) -> bool:
-    """Check if a token has been revoked."""
+    """Check if a specific token JTI has been revoked."""
     r = get_redis()
     if r:
         return r.exists(f"revoked:{jti}") == 1
-    return False  # fail open if Redis is down
+    return False  
 
 
+def revoke_all_user_tokens(user_id: int, expires_in_seconds: int):
+    """
+    Store a 'revoked before' timestamp for a user.
+    Any access token issued at or before this timestamp will be rejected.
+    TTL matches the access token lifetime so the key auto-expires when it
+    becomes irrelevant.
+    """
+    r = get_redis()
+    if r:
+        r.setex(
+            f"revoked_all:{user_id}",
+            expires_in_seconds,
+            datetime.now(timezone.utc).isoformat(),
+        )
 
 
-from db.database import get_db
-from sqlalchemy.orm import Session
-from models.user import User
+def is_user_token_revoked(user_id: int, token_issued_at: float) -> bool:
+    """
+    Return True if the token was issued at or before the last logout-all
+    timestamp stored in Redis for this user.
+    """
+    r = get_redis()
+    if r:
+        revoked_at = r.get(f"revoked_all:{user_id}")
+        if revoked_at:
+            revoked_dt = datetime.fromisoformat(revoked_at)
+            token_dt = datetime.fromtimestamp(token_issued_at, tz=timezone.utc)
+            return token_dt <= revoked_dt
+    return False  
+
 
 
 def get_current_user(
@@ -112,12 +131,21 @@ def get_current_user(
 
     user_id: str = payload.get("sub")
     jti: str = payload.get("jti", "")
+    iat: float = payload.get("iat")
 
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid token payload")
 
+    
     if jti and is_token_revoked(jti):
         raise HTTPException(status_code=401, detail="Token has been revoked")
+
+    
+    if iat and is_user_token_revoked(int(user_id), iat):
+        raise HTTPException(
+            status_code=401,
+            detail="Token has been revoked. Please log in again.",
+        )
 
     user = db.query(User).filter(User.id == int(user_id), User.is_active == True).first()
     if not user:
