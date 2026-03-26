@@ -26,4 +26,6 @@ class User(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
+    token_version = Column(Integer, default=0, nullable=False)
+
     sessions = relationship("UserSession", back_populates="user", cascade="all, delete-orphan")
