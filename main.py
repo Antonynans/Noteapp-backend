@@ -1,8 +1,6 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse
-from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 import os
 
@@ -17,7 +15,7 @@ os.makedirs("uploads/avatars", exist_ok=True)
 app = FastAPI(
     title="Quill API",
     description="Backend API for Quill — Notes application",
-    version="3.0.0",
+    version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
 )
