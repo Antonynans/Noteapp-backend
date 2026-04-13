@@ -17,8 +17,8 @@ class Settings(BaseSettings):
     RATE_LIMIT_PER_MINUTE: int = 60
     AUTH_RATE_LIMIT_PER_MINUTE: int = 10
 
-    GMAIL_USERNAME: str = Field("", env="GMAIL_USERNAME")
-    GMAIL_APP_PASSWORD: str = Field("", env="GMAIL_APP_PASSWORD")
+    BREVO_SMTP_USER: str = ""
+    BREVO_SMTP_PASSWORD: str = ""
 
     UPLOAD_DIR: str = "uploads/avatars"
     MAX_UPLOAD_SIZE: int = 5_000_000  # 5MB

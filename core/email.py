@@ -3,21 +3,21 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from core.config import settings
 
-FROM_ADDRESS = settings.GMAIL_USERNAME or "your-gmail@gmail.com"
+FROM_ADDRESS = settings.BREVO_SMTP_USER
 
 
 def _get_smtp_client():
-    """Get Gmail SMTP client."""
-    server = smtplib.SMTP("smtp.gmail.com", 587)
+    """Get Brevo SMTP client."""
+    server = smtplib.SMTP("smtp-relay.brevo.com", 587)
     server.starttls()
-    server.login(settings.GMAIL_USERNAME, settings.GMAIL_APP_PASSWORD)
+    server.login(settings.BREVO_SMTP_USER, settings.BREVO_SMTP_PASSWORD)
     return server
 
 
 def _send_email(to_email: str, subject: str, html_body: str):
-    """Send an email via Gmail SMTP."""
+    """Send an email via Brevo SMTP."""
     msg = MIMEMultipart()
-    msg["From"] = FROM_ADDRESS
+    msg["From"] = f"Quill <{FROM_ADDRESS}>"
     msg["To"] = to_email
     msg["Subject"] = subject
     msg.attach(MIMEText(html_body, "html"))
