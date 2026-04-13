@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     AUTH_RATE_LIMIT_PER_MINUTE: int = 10
 
     BREVO_SMTP_USER: str = ""
-    BREVO_SMTP_PASSWORD: str = ""
+    BREVO_API_KEY: str = ""
 
     UPLOAD_DIR: str = "uploads/avatars"
     MAX_UPLOAD_SIZE: int = 5_000_000  # 5MB
