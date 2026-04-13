@@ -1,32 +1,26 @@
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import httpx
 from core.config import settings
 
-FROM_ADDRESS = settings.BREVO_SMTP_USER
-
-
-def _get_smtp_client():
-    """Get Brevo SMTP client."""
-    server = smtplib.SMTP("smtp-relay.brevo.com", 587)
-    server.starttls()
-    server.login(settings.BREVO_SMTP_USER, settings.BREVO_SMTP_PASSWORD)
-    return server
+FROM_EMAIL = "antonynans@gmail.com"  # your verified Brevo sender
+FROM_NAME = "Quill"
+BREVO_API_URL = "https://api.brevo.com/v3/smtp/email"
 
 
 def _send_email(to_email: str, subject: str, html_body: str):
-    """Send an email via Brevo SMTP."""
-    msg = MIMEMultipart()
-    msg["From"] = f"Quill <{FROM_ADDRESS}>"
-    msg["To"] = to_email
-    msg["Subject"] = subject
-    msg.attach(MIMEText(html_body, "html"))
+    """Send email via Brevo HTTP API (port 443 — works on Render free tier)."""
+    headers = {
+        "api-key": settings.BREVO_API_KEY,
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "sender": {"name": FROM_NAME, "email": FROM_EMAIL},
+        "to": [{"email": to_email}],
+        "subject": subject,
+        "htmlContent": html_body,
+    }
 
-    server = _get_smtp_client()
-    try:
-        server.send_message(msg)
-    finally:
-        server.quit()
+    response = httpx.post(BREVO_API_URL, json=payload, headers=headers, timeout=10)
+    response.raise_for_status()
 
 
 async def send_verification_email(email: str, token: str, full_name: str = None):
