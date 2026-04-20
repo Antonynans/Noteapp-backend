@@ -1,7 +1,11 @@
 # Quill API
 
 FastAPI backend for the **Quill** app.
-
+---
+## 🌐 Live API
+[![Live Demo](https://img.shields.io/badge/Live-Demo-green?style=for-the-badge&logo=vercel)](https://quillnote.netlify.app/)
+[![API Docs](https://img.shields.io/badge/API-Swagger-blue?style=for-the-badge&logo=swagger)](https://noteapp-backend-c60c.onrender.com/docs)
+[![Frontend Repo](https://img.shields.io/badge/Frontend-Live-green?style=for-the-badge&logo=vercel)](https://github.com/Antonynans/Quill-frontend-)
 ---
 ## Setup & Run
 
